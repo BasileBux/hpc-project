@@ -163,21 +163,6 @@ l'espace de recherche de l'agent.
 
 === Simple prompt
 
-Baseline min-time: 6.505 s
-Optimized min-time: 129.1 ms
-Speedup: $~50.4times$
-
-*Rapport du LLM sur les optimisations proposées:*
-1. Loop reordering: i-j-k $->$ i-k-j: perf stat showed 1.3B L1-dcache load misses (37% miss rate) because B was accessed by columns. Reordering makes B row-wise sequential.
-2. restrict qualifiers on A, B, C: Eliminates aliasing assumptions; enables the compiler to auto-vectorize with AVX2 (vmulpd/vaddpd) without conservative reloads.
-3. aligned_alloc(4096) + pre-fault zeroing: malloc returns 16-byte aligned memory; page alignment eliminates L1 cache-set conflicts between C and B rows. Pre-faulting the zero loop avoids page faults during timing.
-4. Pointer arithmetic for rows (`c_row[j] += a * b_row[j]`): Reduces repeated `i*n/k*n` index arithmetic in the inner loop; compiler generates slightly tighter addressing.
-5. Manual 8× j-unroll & 64×64 blocking: Reverted — both interfered with GCC’s auto-vectorization and register allocation, increasing runtime.
-
-Tokens down: ~150k\
-Tokens up: ~47k\
-Cost: 0.877\$\
-
 = Discussion
 
 == Problème n-body
