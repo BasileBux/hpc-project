@@ -1,192 +1,160 @@
 # HPC project
 
-The goal is to build a full pipeline of agents that can work together to optimize
-a project. The optimization asked can be really targeted and local or more global
-on a whole project.
+The goal is to build a lean pipeline of agents that can work together to optimize
+a C project. The optimization can be targeted and local or more global across a
+whole project.
 
-The biggest bottlenecks in LLMs is memory. Memory is expensive and the LLM remembers
-the last n tokens better and tends to forget content which is too old. This is why
-we have a lot of sub agent which all have really targeted and specific tasks aiming
-to reduce their context windows and token usage.
+The biggest bottleneck in LLMs is context memory: long conversations are expensive
+and older tokens are forgotten. To keep token usage low and context windows tight,
+this pipeline uses only **two** specialized subagents:
+
+1. **profiler** — a cheap agent that only runs shell commands and spits out raw
+   structured metrics.
+2. **optimizer** — a strong agent that reads those metrics, edits source code,
+   compiles, tests, and benchmarks all in one go.
+
+The coordinator's only job is to call them in a loop and commit when things get
+faster.
 
 ## Main idea
 
 ![./diagrams/concept.png](./diagrams/concept.png)
 
-The main agent serves primarily to write prompts for subagents and link them together.
-It's role is to orchestrate the subagents and ensure that the pipeline stays coherent.
-It needs to have a mid/low level of intelligence. It only needs to write good prompts
-and link the agents together.
+The main agent is a lightweight coordinator. It does not analyze code and it does
+not write code. It collects user inputs, maintains `hpc-state.json`, and drives
+a tight loop:
 
-It needs to do one optimization at a time. It has a list of all optimization types
-and goes through them one by one. It only goes to the next one if the previous performance
-assessment is good enough. When this is the case, it commits the code on the current
-branch with a message describing: the iteration and optimization type, the performance
-before and after, and the files changed.
+1. **Init** — run the profiler once to capture baseline metrics.
+2. **Loop** (up to N iterations):
+   - Call the profiler to get fresh metrics.
+   - Hand the metrics to the optimizer, which implements one focused optimization,
+     compiles, runs tests, and benchmarks in a single invocation.
+   - If the optimizer reports faster + correct results, commit. Otherwise revert.
+3. **Report** — summarize gains and render the dashboard.
 
-The optimization loop goes for N iterations. Each iteration does one optimization.
-This way, it's easier to track how many optimizations we are doing.
+This removes the coordination overhead of a 5-agent pipeline and keeps the real
+work inside the optimizer's own context window.
 
 ## Subagents
 
-### Project discovery
+### profiler
 
-Intelligence level: low
+Intelligence level: low (cheap model, e.g. `gpt-4o-mini`)
 
-Is called once before the start of the loop to discover the project and its structure.
-It will focus on the areas of the project which are relevant to the task. It will
-read the project structure and some files to get a good understanding of the project.
+Runs profiling and benchmarking tools and returns extremely concise, structured
+output. It never writes code and never interprets the metrics.
 
-Then, it will write a report on the project structure and the global data flow and
-logic of the different components. This report will be injected in the context of
-all the other agents so that they have a good understanding of the project and don't
-need to polute their context too much with project discovery.
+- **Benchmarking**: `hyperfine`
+- **Hardware counters**: `perf stat`
+- **Cache simulation**: `valgrind --tool=cachegrind`
+- **Static analysis**: `clang-tidy`
 
-### Unit test writer
+Output is JSON or bulleted metrics only.
 
-Intelligence level: mid
+### optimizer
 
-Is called once before the start of the loop to write unit tests for the parts of
-the project which are relevant to the task. The goal is to ensure that the optimizations
-don't change the behavior of the code and that we can easily check if the optimizations
-are correct or not. It will read the project structure and some files to understand
-the code and write unit tests for the relevant parts. It should focus on writing good
-unit tests which cover the relevant parts of the code.
+Intelligence level: high (default model)
 
-### Optimization finder
+Reads the profiler's structured output, reads relevant source files, implements
+one focused optimization, compiles, tests, and benchmarks — all in one invocation.
 
-Intelligence level: high
-
-It is given an optimization type and is able to run benchmarks and read their results
-to identify potential optimizations. It should read files but never write code.
-At the end, it writes a report describing in detail the potential optimizations it
-found in the given optimization type. This report will be the prompt used by the code
-writer agent to write code.
-
-### Code writer
-
-Intelligence level: high
-
-It is given a report on what to optimize and how to optimize it. It should read files
-to understand the context and write the implementation. It should focus on keeping
-the code size small and keep the code quality good. It uses build
-tools to get a fast feedback loop while writing the code. It should also run the
-unit tests as part of the feedback loop to ensure that the optimizations don't break
-the code.
-
-### Performace assessor
-
-Intelligence level: mid
-
-It is called once before the loop to run benchmarks and get the performance of the
-project before any optimization. Then, it is called after each optimization. Once
-the code writer has implemented the optimization, the performance assessor runs
-benchmarks again to asess the performance improvement. It should compare the results
-with the previous performance and write a report describing the performance improvement.
-Actually, it should write two reports: one for the next iteration, and one in json
-format which is written to a file so that we can render it in a nice web dashboard.
+- **Reads** source files to understand context.
+- **Edits** code incrementally (one optimization at a time).
+- **Compiles** with the provided build command.
+- **Tests** by diffing outputs of `inputs_working` against expected results.
+- **Benchmarks** the `input_to_optimise`.
+- **Reports** a concise verdict: faster / slower / unchanged / reverted.
 
 ## Details
 
 ### User inputs
 
-- C code base (more than only 1 file but entire codebase)
-- Only 1 input to optimise (1 fixed command line) (input_to_optimise)
-- Some/All inputs where the code need to work fine. (inputs_working)
-- MaxTime, MaxTokenUse, MaxMoneyUse, MaxNumberOfLoop
-- Metric to optimise (per default use min time)
+- C code base (can be more than one file)
+- One input to optimise (`input_to_optimise`)
+- Working inputs that must keep producing correct output (`inputs_working`)
+- Max loops, max time, max tokens, max cost
+- Metric to optimise (default: minimum time)
 
-Goal: Minimise time used by an algorithm for a fixed input.
+Goal: minimise time used by the algorithm for a fixed input while preserving
+correctness on all working inputs.
 
-### Initialisation Phase
+### Initialization Phase
 
-The goal of this phase is to do multiple things:
+1. Run the **profiler** on `input_to_optimise` to get baseline metrics
+   (min, mean, median, max time).
+2. Store baseline in `hpc-state.json`.
 
-1. Project discovery.
-2. Create unit test, i.e. assume the code is working perfectly as it is. Create files with all inputs tested and attended result (inputs_working + input_to_optimise). Watch out for the use of random variable. If so, change to setseed for reproduction purpose.
-3. Test it's performance on the input to optimise to get the baseline. Only do precise input speed test multiple time (we can look at baseline and do like min_number_of_iteration or else, max_time/one_shot_speed number of time) and track min, mean, median and max time.
+### Loop Phase
 
-Keep track, for which input (we can do one_shot for working inputs but total analysis for input to optimise), which alogrithm is faster of the metric used and we can create a small c script that does if inputs is between that => use this code
+For each iteration (up to `max_iterations`):
 
-BUT on the loop phase, we will only keep track of the better code for the specific input to optimise.
+1. **Profile** — call the profiler to get fresh metrics on the current code.
+2. **Optimize** — call the optimizer with the profiler data, baseline, build
+   command, and input lists. The optimizer does everything in one go:
+   - read source,
+   - implement one focused optimization,
+   - compile,
+   - test (diff outputs),
+   - benchmark.
+3. **Decide** — coordinator checks the optimizer's verdict:
+   - **Faster + correct** → commit with a descriptive message, update `best`.
+   - **Slower or incorrect** → revert changes, log iteration.
+   - **Stop** if max loops reached, budget exceeded, or no improvement for 2
+     consecutive iterations.
 
-### Loop phase
-
-The goal of this phase is to describe exactly how the optimisation loop is working.
-
-1. Time bottleneck test (find which part of the code is the bottleneck using flamegraphs (not visually but numericly))
-2. Find why the bottleneck exist between finite set of predefined limits:
-- Cache
-- Single thread instruction density
-- Parallelisation
-- Theoretical/Model, other algorithm
-- Other data-structure
-
-Using predefined tools like cachegrind, etc...
-
-3. Once thats done, call specific agent optimiser (with specific prompt like focusing on cache optimisation) using all function call stack to optimise, which bottleneck exists (the result of previous analysis)
-
-4. Verify if it compiles, if not, the code writer should fix the code until it compiles.
-
-We keep track of the best code.
-
-6. We loop on this specific problem with all code tested until we get sufficient  performance boost (simple: if better, break)
-
-### Global Rules to follow
+### Global Rules
 
 1. Use only CPU.
 2. Use C code only.
-3. No machine specific optimisation.
-4. No assumption on hardcoding/lut and so on! Do no just output the result.
-5. Max loop, token, price size for all loop.
+3. No machine-specific optimisations unless requested.
+4. No hardcoding results or precomputed lookup tables.
+5. Respect max loops, tokens, time, and cost limits.
 
 ### Compiler & Build
-- **GCC / Clang** — compilation with `-g -O2 -fno-omit-frame-pointer` for profiling; `-O3 -march=native` for final benchmarks; PGO and LTO support
+- **GCC / Clang** — `-g -O2 -fno-omit-frame-pointer` for profiling; `-O3 -march=native` for final benchmarks; PGO and LTO support
 - **Compiler diagnostics extractor** — parses warnings, errors, and vectorization remarks into structured JSON
 
 ### Time Benchmarking
 - **Hyperfine** — cross-platform benchmarking with statistical analysis and JSON export
 
-### Bottleneck Analysis (Flamegraphs)
-- **perf + FlameGraph** — `perf record -F 997 -g` for CPU sampling, `stackcollapse-perf.pl` + `flamegraph.pl` for visualization, `perf report --stdio` for numeric summaries parseable by LLMs
-- **perf stat** — quick hardware counter snapshot (cycles, instructions, branches, branch-misses, cache-references, cache-misses) for bottleneck classification
+### Bottleneck Analysis
+- **perf stat** — quick hardware counter snapshot (cycles, instructions, branches, branch-misses, cache-references, cache-misses)
+- **perf record + FlameGraph** — CPU sampling and numeric summaries
 
 ### Cache Analysis
-- **Valgrind Cachegrind** — simulates L1/L2/LL cache hierarchy, reports `D1mr`/`D2mr`/`D1mw`/`D2mw` per function and source line
-- **perf cache events** — real hardware counters: `L1-dcache-loads/misses`, `L1-icache-loads/misses`, `LLC-loads/misses`, `dTLB-loads/misses`
+- **Valgrind Cachegrind** — simulates L1/L2/LL cache hierarchy
+- **perf cache events** — real hardware counters
 
 ### Branch Prediction
-- **perf branch events** — `branches`, `branch-misses`, `branch-loads`, `branch-load-misses`
-- **perf branch stacks** — `perf record -e branch-misses -b` to capture misprediction locations
+- **perf branch events** — branches, branch-misses, branch-loads
 
 ### Memory / Heap
-- **Valgrind Massif** — heap profiler tracking memory usage over time with peak detection
-- **perf mem record/report** — memory access pattern and latency analysis
+- **Valgrind Massif** — heap profiler
+- **perf mem record/report** — memory access patterns
 
 ### Parallelization
-- **perf sched** — thread scheduling analysis, latency reports
-- **Intel VTune / AMD uProf** — advanced parallel performance analysis (if available on target hardware)
+- **perf sched** — thread scheduling analysis
 
 ### Static Analysis
 - **clang-tidy** — performance and portability anti-pattern detection
 - **cppcheck** — fast C static analysis
 
 ### Binary Analysis
-- **objdump** — disassembly inspection (`-d -M intel -S`)
-- **nm** — symbol table with sizes (`--print-size --size-sort`)
+- **objdump** — disassembly inspection
+- **nm** — symbol table with sizes
 
 ### Correctness & Testing
 - **diff** — output comparison for regression testing
-- **Valgrind Memcheck** — memory error detection to catch optimization-introduced bugs
+- **Valgrind Memcheck** — memory error detection
 
 ### Reporting & Aggregation
-- **Benchmark result parser** — Python script comparing baseline vs. current iteration, calculating improvement %, generating dashboard JSON and commit messages
+- **Benchmark result parser** — compares baseline vs current iteration, calculates improvement %, generates dashboard JSON and commit messages
 
 ---
 
 ## Pi Package Usage
 
-This repository is also a **pi package** that implements the full HPC optimizer workflow.
+This repository is a **pi package** that implements the full HPC optimizer workflow.
 
 ### Installation
 
@@ -207,7 +175,8 @@ pi -e ./extension/index.ts
 | `extension/index.ts` | Main extension — registers `hpc_subagent` and `hpc_show_summary` tools, plus `/hpc-summary` command |
 | `skills/hpc-optimizer/SKILL.md` | Coordinator skill — tells the main agent exactly how to orchestrate subagents |
 | `prompts/hpc-optimize.md` | Prompt template `/hpc-optimize` — kickoff message for the workflow |
-| `agents/*.md` | Subagent definitions (project-discovery, unit-test-writer, optimization-finder, code-writer, performance-assessor) |
+| `agents/profiler.md` | Cheap subagent — runs profiling tools and returns structured metrics |
+| `agents/optimizer.md` | Strong subagent — reads metrics, implements optimizations, compiles, tests, and benchmarks end-to-end |
 
 ### Starting the workflow
 
@@ -230,11 +199,11 @@ The extension is designed for maximum transparency:
 
 ### Subagent Models
 
-You can edit `agents/*.md` to set a `model:` in the frontmatter for cheaper subagents. Example:
+You can edit `agents/*.md` to set a `model:` in the frontmatter. Example:
 
 ```yaml
 ---
-name: project-discovery
+name: profiler
 model: gpt-4o-mini
 ---
 ```
