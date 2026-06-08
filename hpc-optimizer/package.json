@@ -1,0 +1,11 @@
+{
+  "name": "hpc-optimizer",
+  "version": "1.0.0",
+  "description": "Multi-agent C code optimization pipeline for pi",
+  "keywords": ["pi-package"],
+  "pi": {
+    "extensions": ["./extension"],
+    "skills": ["./skills"],
+    "prompts": ["./prompts"]
+  }
+}

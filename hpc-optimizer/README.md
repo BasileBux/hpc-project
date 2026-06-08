@@ -24,8 +24,8 @@ assessment is good enough. When this is the case, it commits the code on the cur
 branch with a message describing: the iteration and optimization type, the performance
 before and after, and the files changed.
 
-The optimization loop goes for N iterations. So it should go over each optimization
-type N times.
+The optimization loop goes for N iterations. Each iteration does one optimization.
+This way, it's easier to track how many optimizations we are doing.
 
 ## Subagents
 
@@ -181,3 +181,62 @@ We keep track of the best code.
 
 ### Reporting & Aggregation
 - **Benchmark result parser** — Python script comparing baseline vs. current iteration, calculating improvement %, generating dashboard JSON and commit messages
+
+---
+
+## Pi Package Usage
+
+This repository is also a **pi package** that implements the full HPC optimizer workflow.
+
+### Installation
+
+From the repository root:
+
+```bash
+# Local install (development)
+pi install git:.
+
+# Or load the extension directly for testing
+pi -e ./extension/index.ts
+```
+
+### Files
+
+| Path | Purpose |
+|------|---------|
+| `extension/index.ts` | Main extension — registers `hpc_subagent` and `hpc_show_summary` tools, plus `/hpc-summary` command |
+| `skills/hpc-optimizer/SKILL.md` | Coordinator skill — tells the main agent exactly how to orchestrate subagents |
+| `prompts/hpc-optimize.md` | Prompt template `/hpc-optimize` — kickoff message for the workflow |
+| `agents/*.md` | Subagent definitions (project-discovery, unit-test-writer, optimization-finder, code-writer, performance-assessor) |
+
+### Starting the workflow
+
+Once the package is loaded in pi, you can either:
+
+1. Type `/hpc-optimize` and fill in the inputs.
+2. Or simply describe your goal, e.g.:
+   > "Optimize my C project. The input to optimize is `./my_program --input large.txt`. Working inputs are `./my_program --input small.txt` and `./my_program --input medium.txt`. Build with `make`."
+
+The coordinator skill will automatically guide the main agent through initialization and the optimization loop.
+
+### UI Transparency
+
+The extension is designed for maximum transparency:
+
+- **Per-subagent prompt** — Expanded tool results show the exact task prompt given to the subagent.
+- **Live streaming** — Subagent outputs stream in real-time while they work.
+- **Call stack widget** — A persistent widget above the editor shows active subagents and call history.
+- **Final summary** — Call `hpc_show_summary` (or type `/hpc-summary`) to see aggregate token usage, cost, and success/failure of every subagent call.
+
+### Subagent Models
+
+You can edit `agents/*.md` to set a `model:` in the frontmatter for cheaper subagents. Example:
+
+```yaml
+---
+name: project-discovery
+model: gpt-4o-mini
+---
+```
+
+Leaving `model` blank uses pi's current default model.
